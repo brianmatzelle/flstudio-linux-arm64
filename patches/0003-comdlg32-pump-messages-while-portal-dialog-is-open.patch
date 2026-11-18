@@ -1,0 +1,153 @@
+--- a/dlls/comdlg32/itemdlg.c
++++ b/dlls/comdlg32/itemdlg.c
+@@ -2589,9 +2589,70 @@
+  * Internal helper to bridge the PE/Unix boundary using the standard
+  * Wine unix_call pattern.
+  */
++/* Local addition (not part of MR 10060): run the blocking portal request on a
++ * worker thread and keep pumping messages on the calling thread, so the
++ * application keeps painting and Wine can drop mouse capture / cursor clipping
++ * (an X pointer grab held by a blocked UI thread starves the native dialog of
++ * input).  The active window is disabled meanwhile, like a modal dialog would. */
++struct portal_thread_args
++{
++    enum comdlg32_unix_funcs code;
++    void *params;
++    NTSTATUS status;
++};
++
++static DWORD WINAPI portal_thread_proc(void *arg)
++{
++    struct portal_thread_args *args = arg;
++    args->status = WINE_UNIX_CALL(args->code, args->params);
++    return 0;
++}
++
++static NTSTATUS call_unix_portal_modal(enum comdlg32_unix_funcs code, void *params)
++{
++    struct portal_thread_args args = { code, params, STATUS_UNSUCCESSFUL };
++    HWND owner = GetActiveWindow();
++    BOOL reenable = FALSE;
++    HANDLE thread;
++    MSG msg;
++
++    ReleaseCapture();
++    ClipCursor(NULL);
++
++    if (!(thread = CreateThread(NULL, 0, portal_thread_proc, &args, 0, NULL)))
++        return WINE_UNIX_CALL(code, params);
++
++    if (owner && IsWindowEnabled(owner))
++    {
++        EnableWindow(owner, FALSE);
++        reenable = TRUE;
++    }
++
++    while (MsgWaitForMultipleObjects(1, &thread, FALSE, INFINITE, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
++    {
++        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
++        {
++            if (msg.message == WM_QUIT)
++            {
++                PostQuitMessage(msg.wParam);
++                WaitForSingleObject(thread, INFINITE);
++                break;
++            }
++            TranslateMessage(&msg);
++            DispatchMessageW(&msg);
++        }
++    }
++    CloseHandle(thread);
++
++    if (reenable) EnableWindow(owner, TRUE);
++    if (owner) SetForegroundWindow(owner);
++    return args.status;
++}
++
+ static NTSTATUS call_unix_portal(enum comdlg32_unix_funcs code, void *params)
+ {
+-	return WINE_UNIX_CALL(code, params);
++    if (code == unix_portal_is_available) return WINE_UNIX_CALL(code, params);
++    return call_unix_portal_modal(code, params);
+ }
+ 
+ static BOOL portal_supports_itemdlg_options(FileDialogImpl *This)
+--- a/dlls/comdlg32/filedlg.c
++++ b/dlls/comdlg32/filedlg.c
+@@ -4307,6 +4307,66 @@
+ 
+ #define UNIX_CALL( func, params ) WINE_UNIX_CALL( unix_ ## func, params )
+ 
++/* Local addition (not part of MR 10060): run the blocking portal request on a
++ * worker thread and keep pumping messages on the calling thread, so the
++ * application keeps painting and Wine can drop mouse capture / cursor clipping
++ * (an X pointer grab held by a blocked UI thread starves the native dialog of
++ * input).  The active window is disabled meanwhile, like a modal dialog would. */
++struct portal_thread_args
++{
++    enum comdlg32_unix_funcs code;
++    void *params;
++    NTSTATUS status;
++};
++
++static DWORD WINAPI portal_thread_proc(void *arg)
++{
++    struct portal_thread_args *args = arg;
++    args->status = WINE_UNIX_CALL(args->code, args->params);
++    return 0;
++}
++
++static NTSTATUS call_unix_portal_modal(enum comdlg32_unix_funcs code, void *params)
++{
++    struct portal_thread_args args = { code, params, STATUS_UNSUCCESSFUL };
++    HWND owner = GetActiveWindow();
++    BOOL reenable = FALSE;
++    HANDLE thread;
++    MSG msg;
++
++    ReleaseCapture();
++    ClipCursor(NULL);
++
++    if (!(thread = CreateThread(NULL, 0, portal_thread_proc, &args, 0, NULL)))
++        return WINE_UNIX_CALL(code, params);
++
++    if (owner && IsWindowEnabled(owner))
++    {
++        EnableWindow(owner, FALSE);
++        reenable = TRUE;
++    }
++
++    while (MsgWaitForMultipleObjects(1, &thread, FALSE, INFINITE, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
++    {
++        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
++        {
++            if (msg.message == WM_QUIT)
++            {
++                PostQuitMessage(msg.wParam);
++                WaitForSingleObject(thread, INFINITE);
++                break;
++            }
++            TranslateMessage(&msg);
++            DispatchMessageW(&msg);
++        }
++    }
++    CloseHandle(thread);
++
++    if (reenable) EnableWindow(owner, TRUE);
++    if (owner) SetForegroundWindow(owner);
++    return args.status;
++}
++
+ static NTSTATUS call_unix_portal(enum comdlg32_unix_funcs code, void *params)
+ {
+     NTSTATUS status;
+@@ -4320,7 +4380,8 @@
+     }
+ 
+     TRACE("call_unix_portal: Calling WINE_UNIX_CALL with code=%d...\n", code);
+-    status = WINE_UNIX_CALL( code, params );
++    if (code == unix_portal_is_available) status = WINE_UNIX_CALL( code, params );
++    else status = call_unix_portal_modal( code, params );
+     TRACE("call_unix_portal: WINE_UNIX_CALL returned 0x%08lx\n", (unsigned long)status);
+     return status;
+ }

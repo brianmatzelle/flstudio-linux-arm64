@@ -1,0 +1,6 @@
+#!/bin/bash
+# Hand a flstudio:// link (account unlock from the browser) to FL Studio.
+# These links carry a login token: the URL itself is never logged.
+. "${FLBASE:-$HOME/.local/share/flstudio}/env.sh"
+FL=$(ls -d "$WINEPREFIX/drive_c/Program Files/Image-Line/FL Studio"* 2>/dev/null | sort -V | tail -1)
+cd "$FL" && exec wine FL64.exe "$1" >>"$FLBASE/run-url.log" 2>&1

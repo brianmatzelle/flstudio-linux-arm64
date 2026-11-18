@@ -1,0 +1,15 @@
+#!/bin/bash
+# FL Studio via ARM64 Proton wine (FEX arm64ec).
+# Usage: flstudio [project.flp] | flstudio --wine <args> | flstudio --kill
+. "${FLBASE:-$HOME/.local/share/flstudio}/env.sh"
+case "$1" in
+  --kill) exec wineserver -k ;;
+  --wine) shift; exec wine "$@" ;;
+esac
+FL=$(ls -d "$WINEPREFIX/drive_c/Program Files/Image-Line/FL Studio"* 2>/dev/null | sort -V | tail -1)
+[ -d "$FL" ] || { echo "FL Studio is not installed in $WINEPREFIX" >&2; exit 1; }
+args=()
+for a in "$@"; do
+  if [ -e "$a" ]; then args+=("$(wine winepath -w "$(realpath "$a")" 2>/dev/null)"); else args+=("$a"); fi
+done
+cd "$FL" && exec wine FL64.exe "${args[@]}" >"$FLBASE/run.log" 2>&1

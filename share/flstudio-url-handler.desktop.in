@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=FL Studio URL Handler
+Comment=Pass flstudio:// links (account unlock etc.) to FL Studio in Wine
+Exec=@BIN@/flstudio-url %u
+NoDisplay=true
+MimeType=x-scheme-handler/flstudio;

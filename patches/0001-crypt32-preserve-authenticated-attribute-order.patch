@@ -1,0 +1,96 @@
+diff --git a/dlls/crypt32/crypt32_private.h b/dlls/crypt32/crypt32_private.h
+index f5918ef..166c1a5 100644
+--- a/dlls/crypt32/crypt32_private.h
++++ b/dlls/crypt32/crypt32_private.h
+@@ -26,6 +26,11 @@ BOOL CNG_ImportPubKey(CERT_PUBLIC_KEY_INFO *pubKeyInfo, BCRYPT_KEY_HANDLE *key);
+ BOOL cng_prepare_signature(const char *alg_oid, BYTE *encoded_sig, DWORD encoded_sig_len,
+     BYTE **sig_value, DWORD *sig_len);
+ 
++/* Encodes attributes as a SET OF preserving the order in attributes->rgAttr
++ * (wine MR 11824: needed to verify signatures over non-canonical SignedAttrs). */
++BOOL CRYPT_AsnEncodePKCSAttributesUnsorted(const CRYPT_ATTRIBUTES *attributes,
++ BYTE **pbEncoded, DWORD *pcbEncoded);
++
+ /* a few asn.1 tags we need */
+ #define ASN_BOOL            (ASN_UNIVERSAL | ASN_PRIMITIVE | 0x01)
+ #define ASN_BITSTRING       (ASN_UNIVERSAL | ASN_PRIMITIVE | 0x03)
+diff --git a/dlls/crypt32/encode.c b/dlls/crypt32/encode.c
+index ecec1bf..037c478 100644
+--- a/dlls/crypt32/encode.c
++++ b/dlls/crypt32/encode.c
+@@ -1234,6 +1234,7 @@ struct DERSetDescriptor
+     size_t                  itemSize;
+     size_t                  itemOffset;
+     CryptEncodeObjectExFunc encode;
++    BOOL                    noSort;
+ };
+ 
+ static BOOL WINAPI CRYPT_DEREncodeItemsAsSet(DWORD dwCertEncodingType,
+@@ -1291,8 +1292,9 @@ static BOOL WINAPI CRYPT_DEREncodeItemsAsSet(DWORD dwCertEncodingType,
+         {
+             if (dwFlags & CRYPT_ENCODE_ALLOC_FLAG)
+                 pbEncoded = *(BYTE **)pbEncoded;
+-            qsort(setOf.rgBlob, setOf.cBlob, sizeof(CRYPT_DER_BLOB),
+-             BLOBComp);
++            if (!desc->noSort)
++                qsort(setOf.rgBlob, setOf.cBlob, sizeof(CRYPT_DER_BLOB),
++                 BLOBComp);
+             *pbEncoded++ = ASN_CONSTRUCTOR | ASN_SETOF;
+             CRYPT_EncodeLen(bytesNeeded - lenBytes - 1, pbEncoded, &lenBytes);
+             pbEncoded += lenBytes;
+@@ -1903,7 +1905,7 @@ static BOOL WINAPI CRYPT_AsnEncodePKCSAttributes(DWORD dwCertEncodingType,
+     {
+         const CRYPT_ATTRIBUTES *attributes = pvStructInfo;
+         struct DERSetDescriptor desc = { attributes->cAttr, attributes->rgAttr,
+-         sizeof(CRYPT_ATTRIBUTE), 0, CRYPT_AsnEncodePKCSAttribute };
++         sizeof(CRYPT_ATTRIBUTE), 0, CRYPT_AsnEncodePKCSAttribute, FALSE };
+ 
+         ret = CRYPT_DEREncodeItemsAsSet(X509_ASN_ENCODING, lpszStructType,
+          &desc, dwFlags, pEncodePara, pbEncoded, pcbEncoded);
+@@ -1916,6 +1918,16 @@ static BOOL WINAPI CRYPT_AsnEncodePKCSAttributes(DWORD dwCertEncodingType,
+     return ret;
+ }
+ 
++BOOL CRYPT_AsnEncodePKCSAttributesUnsorted(const CRYPT_ATTRIBUTES *attributes,
++ BYTE **pbEncoded, DWORD *pcbEncoded)
++{
++    struct DERSetDescriptor desc = { attributes->cAttr, attributes->rgAttr,
++     sizeof(CRYPT_ATTRIBUTE), 0, CRYPT_AsnEncodePKCSAttribute, TRUE };
++
++    return CRYPT_DEREncodeItemsAsSet(X509_ASN_ENCODING, NULL, &desc,
++     CRYPT_ENCODE_ALLOC_FLAG, NULL, (BYTE *)pbEncoded, pcbEncoded);
++}
++
+ /* Like CRYPT_AsnEncodePKCSContentInfo, but allows the OID to be NULL */
+ static BOOL WINAPI CRYPT_AsnEncodePKCSContentInfoInternal(
+  DWORD dwCertEncodingType, LPCSTR lpszStructType, const void *pvStructInfo,
+diff --git a/dlls/crypt32/msg.c b/dlls/crypt32/msg.c
+index fafa404..61f6c4d 100644
+--- a/dlls/crypt32/msg.c
++++ b/dlls/crypt32/msg.c
+@@ -1136,9 +1136,22 @@ static BOOL CSignedMsgData_UpdateAuthenticatedAttributes(
+                 LPBYTE encodedAttrs;
+                 DWORD size;
+ 
+-                ret = CryptEncodeObjectEx(X509_ASN_ENCODING, PKCS_ATTRIBUTES,
+-                 &msg_data->info->rgSignerInfo[i].AuthAttrs,
+-                 CRYPT_ENCODE_ALLOC_FLAG, NULL, &encodedAttrs, &size);
++                /* The signature covers the authenticated attributes exactly
++                 * as the signer encoded them, and that encoding is not
++                 * required to be in canonical DER SET OF order.  Sorting
++                 * them here would change the digest and reject a valid
++                 * signature, so preserve the decoded order when verifying.
++                 * When signing, sort as DER requires.
++                 */
++                if (flag == Verify)
++                    ret = CRYPT_AsnEncodePKCSAttributesUnsorted(
++                     &msg_data->info->rgSignerInfo[i].AuthAttrs,
++                     &encodedAttrs, &size);
++                else
++                    ret = CryptEncodeObjectEx(X509_ASN_ENCODING,
++                     PKCS_ATTRIBUTES,
++                     &msg_data->info->rgSignerInfo[i].AuthAttrs,
++                     CRYPT_ENCODE_ALLOC_FLAG, NULL, &encodedAttrs, &size);
+                 if (ret)
+                 {
+                     ret = CryptHashData(

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=FL Studio
+Exec=@BIN@/flstudio %f
+Categories=AudioVideo;Audio;
+MimeType=application/x-flp;
+StartupWMClass=steam_proton
